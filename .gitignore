@@ -1,0 +1,12 @@
+# .NET build output
+bin/
+obj/
+
+# OS
+Thumbs.db
+desktop.ini
+
+# Editor
+.vs/
+.vscode/
+*.user

@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>ClaudeSignalTray</AssemblyName>
+    <RootNamespace>ClaudeSignalTray</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ApplicationIcon>icon.ico</ApplicationIcon>
+
+    <!-- 配布用に単一の自己完結exeとしてビルドするための設定。
+         これがあることで、実行するPC側に.NETランタイムがインストールされていなくても動く。 -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- PerformanceCounter は .NET Core/5+ では別パッケージ(Windows専用)なので明示的に参照する -->
+    <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- experiments/ 配下には別プロジェクト(uia-probe, network-probe)が独自のcsprojを持って
+         入れ子で存在している。既定のワイルドカード収集だとそれらの .cs ファイルまで
+         このプロジェクトに巻き込んでしまい、Program/Main の重複などでビルドが壊れるため、
+         明示的に除外する。 -->
+    <Compile Remove="experiments/**/*.cs" />
+    <Compile Remove="experiments/**" />
+    <EmbeddedResource Remove="experiments/**" />
+    <None Remove="experiments/**" />
+  </ItemGroup>
+
+</Project>
