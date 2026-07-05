@@ -1,0 +1,12 @@
+{
+  "name": "default-cat",
+  "frameWidth": 32,
+  "frameHeight": 32,
+  "frameDurationMs": 180,
+  "states": {
+    "idle": { "row": 0, "frames": 6 },
+    "run":  { "row": 1, "frames": 6 },
+    "wave": { "row": 2, "frames": 6 },
+    "off":  { "row": 3, "frames": 6 }
+  }
+}

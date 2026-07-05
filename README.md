@@ -42,8 +42,9 @@ dotnet publish -c Release
 bin\Release\net8.0-windows\win-x64\publish\ClaudeSignalTray.exe
 ```
 
-実行ファイル自体のアイコン（`icon.ico`、赤/黄/緑の3色バンド）は、実行中にタスクトレイへ
+実行ファイル自体のアイコン（`icon.ico`、オレンジの丸眼鏡をかけたコウモリ）は、実行中にタスクトレイへ
 動的に描画される状態ドットとは別物です。エクスプローラーやタスクバーでの表示用です。
+再生成する場合は `python3 scripts/gen_app_icon.py` を実行してください（16〜256pxの7サイズを内包）。
 
 > 未署名のexeなので、初回実行時にSmartScreenの警告が出ることがあります。気になる場合はソースからビルドして使ってください。
 
@@ -86,6 +87,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Install-AutoStart.ps1
 | 設定を再読み込み | `config.json` を編集後、再起動せずに反映する |
 | オーバーレイウィンドウを表示 | 下記「オーバーレイウィンドウ」参照 |
 | オーバーレイのサイズ（小/大） | オーバーレイウィンドウの表示サイズを切り替える |
+| オーバーレイの表示形式（信号機/ペット） | 下記「ペットモード」参照 |
+| ペットの選択 | 使用するペットの切り替え／ペットフォルダを開く |
 | 終了 | アプリを終了する |
 
 ## オーバーレイウィンドウ
@@ -97,6 +100,21 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Install-AutoStart.ps1
 - 「オーバーレイのサイズ」サブメニューから「小」「大」の2種類のサイズを選べます。選択内容も`config.json`（`OverlaySize`: `"Small"`/`"Large"`）に保存され、次回起動時も復元されます。
 - タイトルバー・枠なしの小さなウィンドウで、フォーカスを奪わない設定にしているため、他のアプリを操作中でも作業の邪魔になりません（本ツールの目的が「フォアグラウンド作業を妨げないこと」であるため、この点は意図的に配慮しています）。
 - 右クリックメニューはトレイアイコンと共通です。
+
+## ペットモード
+
+オーバーレイウィンドウの表示形式を、従来の信号機（●＋テキスト）と、キャラクターのアニメーションで状態を伝える「ペット」から選べます（Codex Petsと同様のコンセプト）。トレイメニュー →「オーバーレイの表示形式」→「ペット」で切り替えます。既定は信号機です（客先・画面共有などでも堅い表示のため）。
+
+状態とアニメーションの対応:
+
+| 状態 | 動作 |
+| --- | --- |
+| 待機中/完了 | すやすや寝ている（Zzz） |
+| 作業中 | 走っている |
+| 確認待ちの可能性 | 手を振って呼んでいる（！マーク点滅） |
+| Claude未検出 | 灰色でぺたんと寝ている |
+
+**カスタムペット:** `%LOCALAPPDATA%\ClaudeSignalTray\pets\<ペット名>\` に `pet.json` と `spritesheet.png` を置くと、「ペットの選択」メニューに現れます。初回起動時に組み込みペット2種（`default`=ねこ、`bat`=オレンジ眼鏡のコウモリ。アプリアイコンと同モチーフ）が同フォルダへ展開されるので、フォーマットの実例として参照してください。スプライトシートは横=フレーム・縦=状態のグリッドで、拡大は最近傍補間（ピクセルアート向き）です。作成手順・仕様・画像生成AIへの依頼プロンプト例は [docs/pet-creation-guide.md](docs/pet-creation-guide.md) を、設計の背景は [docs/pet-overlay-design.md](docs/pet-overlay-design.md) を参照してください。壊れた定義ファイルは無視され、組み込みペットにフォールバックします（アプリは落ちません）。
 
 ## 設定ファイル（config.json）
 
@@ -115,7 +133,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Install-AutoStart.ps1
   "OverlayEnabled": false,
   "OverlayX": -1,
   "OverlayY": -1,
-  "OverlaySize": "Small"
+  "OverlaySize": "Small",
+  "OverlayMode": "Signal",
+  "PetName": "default"
 }
 ```
 
@@ -130,6 +150,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Install-AutoStart.ps1
 | `ConfirmWaitEnterBytesPerSec` | アイドル→確認待ちになる条件（これ以上） |
 | `WorkingThresholdBytesPerSec` | これ以上なら「作業中」 |
 | `OverlayEnabled` / `OverlayX` / `OverlayY` / `OverlaySize` | オーバーレイウィンドウの表示状態・位置・サイズ |
+| `OverlayMode` | オーバーレイの表示形式（`"Signal"`=信号機 / `"Pet"`=ペット） |
+| `PetName` | 使用するペット名（`pets`フォルダ内のディレクトリ名。既定: `default`） |
 
 編集後は、タスクトレイアイコンを右クリック →「設定を再読み込み」で、アプリを再起動せずに反映できます。値が壊れている・大小関係が矛盾している場合は、該当項目のみ既定値にフォールバックし、アプリが動かなくなることは避けています。
 

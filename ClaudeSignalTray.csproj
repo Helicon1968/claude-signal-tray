@@ -26,6 +26,19 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- 組み込みペット(ペットオーバーレイ用)。
+         petsフォルダが空・壊れていても必ず動くよう、exeに埋め込む。
+         初回起動時に %LOCALAPPDATA%\ClaudeSignalTray\pets\ へ展開される。
+         再生成は scripts/gen_default_pet.py / gen_bat_pet.py を実行(docs/pet-overlay-design.md参照)。
+         追加する場合は assets/pets/<名前>/ を作り、下に2行追加し、
+         PetLibrary.BuiltinPetNames にも名前を足すこと。 -->
+    <EmbeddedResource Include="assets\pets\default\pet.json" LogicalName="ClaudeSignalTray.Pets.default.pet.json" />
+    <EmbeddedResource Include="assets\pets\default\spritesheet.png" LogicalName="ClaudeSignalTray.Pets.default.spritesheet.png" />
+    <EmbeddedResource Include="assets\pets\bat\pet.json" LogicalName="ClaudeSignalTray.Pets.bat.pet.json" />
+    <EmbeddedResource Include="assets\pets\bat\spritesheet.png" LogicalName="ClaudeSignalTray.Pets.bat.spritesheet.png" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- experiments/ 配下には別プロジェクト(uia-probe, network-probe)が独自のcsprojを持って
          入れ子で存在している。既定のワイルドカード収集だとそれらの .cs ファイルまで
          このプロジェクトに巻き込んでしまい、Program/Main の重複などでビルドが壊れるため、

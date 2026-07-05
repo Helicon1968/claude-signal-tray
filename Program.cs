@@ -73,6 +73,18 @@ internal sealed class MonitorConfig
     /// <summary>"Small" または "Large"。不正な値は既定値(Small)にフォールバックする。</summary>
     public string OverlaySize { get; set; } = "Small";
 
+    /// <summary>
+    /// オーバーレイの表示形式。"Signal"(信号機: ●＋テキスト) または "Pet"(ペットアニメーション)。
+    /// 既定はSignal(客先や画面共有などでも堅い表示)。詳細は docs/pet-overlay-design.md 参照。
+    /// </summary>
+    public string OverlayMode { get; set; } = "Signal";
+
+    /// <summary>
+    /// 使用するペット名(%LOCALAPPDATA%\ClaudeSignalTray\pets 配下のフォルダ名)。
+    /// 読み込みに失敗した場合は組み込みペット(default)にフォールバックする。
+    /// </summary>
+    public string PetName { get; set; } = "default";
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
@@ -143,6 +155,8 @@ internal sealed class MonitorConfig
         if (DebounceTicks <= 0) DebounceTicks = d.DebounceTicks;
         if (RefreshInstancesEveryNTicks <= 0) RefreshInstancesEveryNTicks = d.RefreshInstancesEveryNTicks;
         if (OverlaySize != "Small" && OverlaySize != "Large") OverlaySize = d.OverlaySize;
+        if (OverlayMode != "Signal" && OverlayMode != "Pet") OverlayMode = d.OverlayMode;
+        if (string.IsNullOrWhiteSpace(PetName)) PetName = d.PetName;
 
         if (IdleEnterBytesPerSec < 0
             || ConfirmWaitEnterBytesPerSec <= IdleEnterBytesPerSec
@@ -474,6 +488,9 @@ internal sealed class TrayContext : ApplicationContext
     private readonly ToolStripMenuItem _itemOverlay;
     private readonly ToolStripMenuItem _itemOverlaySizeSmall;
     private readonly ToolStripMenuItem _itemOverlaySizeLarge;
+    private readonly ToolStripMenuItem _itemModeSignal;
+    private readonly ToolStripMenuItem _itemModePet;
+    private readonly ToolStripMenuItem _itemPetSelect;
     private readonly System.Windows.Forms.Timer _pollTimer;
     private readonly System.Windows.Forms.Timer _blinkTimer;
     private readonly NetworkStateMonitor _monitor = new(MonitorConfig.LoadOrCreateDefault());
@@ -531,6 +548,24 @@ internal sealed class TrayContext : ApplicationContext
         itemOverlaySize.DropDownItems.Add(_itemOverlaySizeSmall);
         itemOverlaySize.DropDownItems.Add(_itemOverlaySizeLarge);
         menu.Items.Add(itemOverlaySize);
+
+        // 表示形式(信号機/ペット)の切り替え。既定は信号機(docs/pet-overlay-design.md参照)。
+        var isPetInitial = _monitor.Config.OverlayMode == "Pet";
+        _itemModeSignal = new ToolStripMenuItem("信号機") { Checked = !isPetInitial };
+        _itemModePet = new ToolStripMenuItem("ペット") { Checked = isPetInitial };
+        _itemModeSignal.Click += (_, _) => SetOverlayMode(petMode: false);
+        _itemModePet.Click += (_, _) => SetOverlayMode(petMode: true);
+
+        var itemOverlayMode = new ToolStripMenuItem("オーバーレイの表示形式");
+        itemOverlayMode.DropDownItems.Add(_itemModeSignal);
+        itemOverlayMode.DropDownItems.Add(_itemModePet);
+        menu.Items.Add(itemOverlayMode);
+
+        // ペットの選択。開くたびにpetsフォルダをスキャンして最新の一覧を表示する。
+        _itemPetSelect = new ToolStripMenuItem("ペットの選択");
+        _itemPetSelect.DropDownOpening += (_, _) => RebuildPetMenu();
+        RebuildPetMenu();
+        menu.Items.Add(_itemPetSelect);
         menu.Items.Add(new ToolStripSeparator());
 
         var itemExit = new ToolStripMenuItem("終了");
@@ -547,8 +582,11 @@ internal sealed class TrayContext : ApplicationContext
 
         // オーバーレイウィンドウ(常時最前面の小さな状態表示)。
         // 右クリックメニューはトレイアイコンと共有する。
-        _overlay = new OverlayWindow(menu);
+        // 初回起動時に組み込みペットをpetsフォルダへ展開する(カスタムペットの実例を兼ねる)。
+        PetLibrary.EnsureBuiltinPetsExtracted();
+        _overlay = new OverlayWindow(menu, PetLibrary.LoadByNameOrDefault(_monitor.Config.PetName));
         _overlay.ApplySizePreset(isLargeInitial);
+        _overlay.SetPetMode(isPetInitial);
         _overlay.PositionChanged += OnOverlayPositionChanged;
         PositionOverlayIfNeeded();
         if (_monitor.Config.OverlayEnabled)
@@ -593,6 +631,53 @@ internal sealed class TrayContext : ApplicationContext
         {
             _overlay.Hide();
         }
+    }
+
+    private void SetOverlayMode(bool petMode)
+    {
+        _monitor.Config.OverlayMode = petMode ? "Pet" : "Signal";
+        _monitor.Config.TrySave();
+
+        _itemModeSignal.Checked = !petMode;
+        _itemModePet.Checked = petMode;
+
+        _overlay.SetPetMode(petMode);
+
+        // モードによりウィンドウサイズが変わるため、既定位置利用時は位置を再計算する
+        PositionOverlayIfNeeded();
+    }
+
+    /// <summary>「ペットの選択」サブメニューをpetsフォルダの現状に合わせて作り直す。</summary>
+    private void RebuildPetMenu()
+    {
+        _itemPetSelect.DropDownItems.Clear();
+
+        foreach (var name in PetLibrary.ListPetNames())
+        {
+            var item = new ToolStripMenuItem(name)
+            {
+                Checked = string.Equals(name, _monitor.Config.PetName, StringComparison.OrdinalIgnoreCase),
+            };
+            var petName = name;
+            item.Click += (_, _) => SelectPet(petName);
+            _itemPetSelect.DropDownItems.Add(item);
+        }
+
+        _itemPetSelect.DropDownItems.Add(new ToolStripSeparator());
+        var itemOpenPets = new ToolStripMenuItem("ペットフォルダを開く");
+        itemOpenPets.Click += (_, _) =>
+        {
+            Directory.CreateDirectory(PetLibrary.GetPetsDirectory());
+            Process.Start(new ProcessStartInfo("explorer.exe", PetLibrary.GetPetsDirectory()) { UseShellExecute = true });
+        };
+        _itemPetSelect.DropDownItems.Add(itemOpenPets);
+    }
+
+    private void SelectPet(string name)
+    {
+        _monitor.Config.PetName = name;
+        _monitor.Config.TrySave();
+        _overlay.SetPet(PetLibrary.LoadByNameOrDefault(name));
     }
 
     private void SetOverlaySize(bool large)
@@ -649,6 +734,7 @@ internal sealed class TrayContext : ApplicationContext
                 _itemStatus.Text = "Claude未検出";
                 _overlay.SetDotColor(ColorGray);
                 _overlay.SetText("Claude未検出");
+                _overlay.SetPetState("off");
                 break;
             case 0:
                 _trayIcon.Icon = _iconGreen;
@@ -656,6 +742,7 @@ internal sealed class TrayContext : ApplicationContext
                 _itemStatus.Text = $"待機中/完了 ({kbText} KB/s, {_monitor.ProcessCount}プロセス)";
                 _overlay.SetDotColor(ColorGreen);
                 _overlay.SetText($"待機中/完了 ({kbText} KB/s)");
+                _overlay.SetPetState("idle");
                 break;
             case 1:
                 _trayIcon.Icon = _iconYellow;
@@ -663,12 +750,14 @@ internal sealed class TrayContext : ApplicationContext
                 _itemStatus.Text = $"作業中 ({kbText} KB/s, {_monitor.ProcessCount}プロセス)";
                 _overlay.SetDotColor(ColorYellow);
                 _overlay.SetText($"作業中 ({kbText} KB/s)");
+                _overlay.SetPetState("run");
                 break;
             case 2:
                 // ドットの点滅は _blinkTimer が担当するので、ここではテキストのみ更新する。
                 _trayIcon.Text = $"claude-signal-tray: 確認待ちの可能性 ({kbText} KB/s)";
                 _itemStatus.Text = $"確認待ちの可能性 ({kbText} KB/s, {_monitor.ProcessCount}プロセス)";
                 _overlay.SetText($"確認待ちの可能性 ({kbText} KB/s)");
+                _overlay.SetPetState("wave");
                 break;
         }
     }
@@ -692,6 +781,14 @@ internal sealed class TrayContext : ApplicationContext
     {
         _monitor.ReloadConfig();
         _pollTimer.Interval = _monitor.Config.PollIntervalMs;
+
+        // オーバーレイの表示形式・ペットも再読み込み後の設定値で反映し直す
+        var petMode = _monitor.Config.OverlayMode == "Pet";
+        _itemModeSignal.Checked = !petMode;
+        _itemModePet.Checked = petMode;
+        _overlay.SetPet(PetLibrary.LoadByNameOrDefault(_monitor.Config.PetName));
+        _overlay.SetPetMode(petMode);
+
         _trayIcon.ShowBalloonTip(2000, "claude-signal-tray",
             $"設定を再読み込みしました:\n{MonitorConfig.GetConfigPath()}", ToolTipIcon.Info);
     }
@@ -745,6 +842,10 @@ internal sealed class OverlayWindow : Form
 {
     private readonly Panel _dot;
     private readonly Label _label;
+    private readonly PetView _petView;
+
+    private bool _large;
+    private bool _petMode;
 
     private bool _dragging;
     private Point _dragStartMouse;
@@ -752,7 +853,7 @@ internal sealed class OverlayWindow : Form
 
     public event Action<Point>? PositionChanged;
 
-    public OverlayWindow(ContextMenuStrip contextMenu)
+    public OverlayWindow(ContextMenuStrip contextMenu, Pet initialPet)
     {
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
@@ -774,34 +875,83 @@ internal sealed class OverlayWindow : Form
         };
         Controls.Add(_label);
 
-        // フォーム本体・ドット・ラベルのいずれをドラッグしても移動できるようにする
-        foreach (Control c in new Control[] { this, _dot, _label })
+        _petView = new PetView(initialPet) { Visible = false };
+        Controls.Add(_petView);
+
+        // フォーム本体・ドット・ラベル・ペットのいずれをドラッグしても移動でき、
+        // どこを右クリックしても共通メニューが開くようにする
+        foreach (Control c in new Control[] { this, _dot, _label, _petView })
         {
             c.MouseDown += OnMouseDown;
             c.MouseMove += OnMouseMove;
             c.MouseUp += OnMouseUp;
+            c.ContextMenuStrip = contextMenu;
         }
 
-        ApplySizePreset(large: false);
+        ApplyLayout();
     }
 
     public void SetDotColor(Color color) => _dot.BackColor = color;
 
     public void SetText(string text) => _label.Text = text;
 
-    /// <summary>
-    /// ウィンドウ全体・ドット・ラベルのサイズを、小/大の2種類のプリセットで
-    /// 一括切り替えする。
-    /// </summary>
+    /// <summary>ペットのアニメーション状態("idle"/"run"/"wave"/"off")を設定する。</summary>
+    public void SetPetState(string state) => _petView.SetAnimationState(state);
+
+    /// <summary>表示するペットを差し替える(トレイメニューからの選択時)。</summary>
+    public void SetPet(Pet pet)
+    {
+        _petView.SetPet(pet);
+        ApplyLayout();
+    }
+
+    /// <summary>表示形式(信号機/ペット)を切り替える。</summary>
+    public void SetPetMode(bool petMode)
+    {
+        _petMode = petMode;
+        ApplyLayout();
+        UpdateAnimating();
+    }
+
+    /// <summary>ウィンドウ全体のサイズを、小/大の2種類のプリセットで一括切り替えする。</summary>
     public void ApplySizePreset(bool large)
     {
-        if (large)
+        _large = large;
+        ApplyLayout();
+    }
+
+    /// <summary>
+    /// 現在のモード(信号機/ペット)とサイズ(小/大)に応じてレイアウトを組み直す。
+    /// 信号機: 横並びの ●＋テキスト。 ペット: スプライトを上、テキストを下に配置。
+    /// </summary>
+    private void ApplyLayout()
+    {
+        _dot.Visible = !_petMode;
+        _petView.Visible = _petMode;
+
+        if (_petMode)
+        {
+            var scale = _large ? 3 : 2;
+            _petView.SetScale(scale);
+
+            var width = Math.Max(_petView.Width + 24, _large ? 210 : 150);
+            var labelHeight = _large ? 22 : 18;
+            Size = new Size(width, 6 + _petView.Height + labelHeight + 6);
+
+            _petView.Location = new Point((width - _petView.Width) / 2, 6);
+            _label.Location = new Point(4, 6 + _petView.Height + 2);
+            _label.Size = new Size(width - 8, labelHeight);
+            _label.TextAlign = ContentAlignment.MiddleCenter;
+            _label.Font = new Font("Segoe UI", _large ? 10f : 8f);
+        }
+        else if (_large)
         {
             Size = new Size(300, 60);
             _dot.Size = new Size(22, 22);
             _dot.Location = new Point(16, 19);
             _label.Location = new Point(48, 15);
             _label.Size = new Size(236, 30);
+            _label.TextAlign = ContentAlignment.TopLeft;
             _label.Font = new Font("Segoe UI", 12f);
         }
         else
@@ -811,10 +961,20 @@ internal sealed class OverlayWindow : Form
             _dot.Location = new Point(12, 14);
             _label.Location = new Point(36, 11);
             _label.Size = new Size(172, 22);
+            _label.TextAlign = ContentAlignment.TopLeft;
             _label.Font = new Font("Segoe UI", 9f);
         }
 
         RefreshDotRegion();
+    }
+
+    /// <summary>非表示中・信号機モード中はフレームタイマーを止め、無駄なCPU消費を避ける。</summary>
+    private void UpdateAnimating() => _petView.SetAnimating(Visible && _petMode);
+
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        UpdateAnimating();
     }
 
     private void RefreshDotRegion()
