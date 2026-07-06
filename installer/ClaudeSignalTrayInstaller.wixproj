@@ -1,0 +1,24 @@
+<Project Sdk="WixToolset.Sdk/6.0.2">
+
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <OutputName>ClaudeSignalTraySetup</OutputName>
+    <Platform>x64</Platform>
+
+    <!-- 本体側csprojの<Version>と合わせる。本体のバージョンを上げたら
+         こちらも合わせて変更すること(MSIのMajorUpgrade判定に使われる)。 -->
+    <ProductVersion>1.2.0</ProductVersion>
+
+    <!-- 本体を`dotnet publish -c Release`した成果物の場所。
+         本体csprojのTargetFramework/RuntimeIdentifierを変更した場合はここも
+         合わせて変更すること。 -->
+    <ClaudeSignalTrayPublishDir Condition="'$(ClaudeSignalTrayPublishDir)' == ''">$(MSBuildThisFileDirectory)..\bin\Release\net8.0-windows\win-x64\publish\</ClaudeSignalTrayPublishDir>
+
+    <DefineConstants>ProductVersion=$(ProductVersion);PublishDir=$(ClaudeSignalTrayPublishDir);RepoRoot=$(MSBuildThisFileDirectory)..\</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="6.0.2" />
+  </ItemGroup>
+
+</Project>

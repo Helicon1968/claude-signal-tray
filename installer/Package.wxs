@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  claude-signal-tray のMSIインストーラー定義(WiX Toolset v5+)。
+
+  前提: このプロジェクトをビルドする前に、本体(ClaudeSignalTray.csproj側)で
+  `dotnet publish -c Release` を実行し、自己完結型の単一exe
+  (bin\Release\net8.0-windows\win-x64\publish\ClaudeSignalTray.exe)を
+  生成しておくこと(installer/README.md参照)。このプロジェクトはそのexeを
+  そのまま取り込むだけで、本体のビルドはしない。
+
+  per-user install(Scope="perUser")を選んでいるのは、このアプリ自体が
+  管理者権限なしで動作するタスクトレイ常駐アプリであり、README記載の
+  自動起動設定もスタートアップフォルダ方式(管理者権限不要)を採用している
+  という既存の方針に合わせるため。
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package Name="claude-signal-tray"
+           Manufacturer="claude-signal-tray project"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="bd102a77-4ba9-4e5b-a896-7eacedde8079"
+           Scope="perUser"
+           Codepage="65001">
+
+    <SummaryInformation Description="claude-signal-tray installer" />
+
+    <!-- UpgradeCodeは固定。バージョンを上げる場合はClaudeSignalTray.csprojの
+         <Version>のみを変更すればよい(このGUIDは変更しないこと)。 -->
+    <MajorUpgrade DowngradeErrorMessage="より新しいバージョンのclaude-signal-trayが既にインストールされています。" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Feature Id="MainFeature" Title="claude-signal-tray" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+      <ComponentRef Id="StartMenuShortcutComponent" />
+    </Feature>
+
+    <Icon Id="AppIcon.ico" SourceFile="$(var.RepoRoot)icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.ico" />
+
+    <!-- WixUI_Minimal(下記)が「変更」「修復」非対応のARPNOREPAIR/ARPNOMODIFYを
+         既に定義しているため、ここでは重複定義しない。 -->
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
+  </Package>
+
+  <Fragment>
+    <!-- 本体(exe)は %LOCALAPPDATA%\Programs\ClaudeSignalTray\ に置く。
+         アプリ自身が設定・ログ・ペット定義を保存する %LOCALAPPDATA%\ClaudeSignalTray\
+         (MonitorConfig.GetConfigPath()等参照)とは別のフォルダにすることで、
+         プログラム本体とユーザーデータが混ざらないようにしている。 -->
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="LocalAppDataProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="ClaudeSignalTray" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppProgramMenuFolder" Name="ClaudeSignalTray" />
+    </StandardDirectory>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+      <!-- per-user(ユーザープロファイル配下)へのインストールでは、Windows Installerの
+           ICE38ルールにより、ファイルではなくHKCU配下のレジストリキーをKeyPathに
+           しなければならない。またICE64ルールにより、ユーザープロファイル配下に
+           作成したフォルダはRemoveFolderで明示的にアンインストール時の削除対象に
+           する必要がある。 -->
+      <Component Id="MainExecutableComponent" Guid="15949986-5d84-468e-8034-679cf1675b5a">
+        <File Id="ClaudeSignalTrayExe"
+              Source="$(var.PublishDir)ClaudeSignalTray.exe" />
+        <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+        <!-- %LOCALAPPDATA%\Programs\ は他アプリも使う共有フォルダだが、RemoveFolderは
+             空の場合のみ削除するため、他アプリのファイルが残っていれば削除されない。 -->
+        <RemoveFolder Id="RemoveProgramsFolder" Directory="LocalAppDataProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU"
+                        Key="Software\ClaudeSignalTray"
+                        Name="InstallPath"
+                        Type="string"
+                        Value="[INSTALLFOLDER]"
+                        KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Component Id="StartMenuShortcutComponent" Directory="AppProgramMenuFolder" Guid="*">
+      <Shortcut Id="StartMenuShortcut"
+                Name="ClaudeSignalTray"
+                Description="Claudeの作業状況をタスクトレイの信号アイコンで表示"
+                Target="[INSTALLFOLDER]ClaudeSignalTray.exe"
+                WorkingDirectory="INSTALLFOLDER" />
+      <RemoveFolder Id="RemoveAppProgramMenuFolder" On="uninstall" />
+      <RegistryValue Root="HKCU"
+                      Key="Software\ClaudeSignalTray"
+                      Name="Installed"
+                      Type="integer"
+                      Value="1"
+                      KeyPath="yes" />
+    </Component>
+  </Fragment>
+</Wix>

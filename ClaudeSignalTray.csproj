@@ -4,10 +4,17 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
+    <!-- PerMonitorV2にしておくことで、ディスプレイの拡大縮小率が100%超の環境でも
+         DeviceDpiが正しい値を返し、モニター間移動時や設定変更時にDpiChangedイベントが
+         発火するようになる(OverlayWindow.ApplyLayoutのDPI追従に必要、README/HISTORY参照)。 -->
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>ClaudeSignalTray</AssemblyName>
     <RootNamespace>ClaudeSignalTray</RootNamespace>
+    <!-- installer/ClaudeSignalTrayInstaller.wixproj からMSIのProductVersionとして参照する。
+         上げる場合はここを変更する(MSIのUpgradeCode等はinstaller側のPackage.wxs参照)。 -->
+    <Version>1.2.0</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
     <ApplicationIcon>icon.ico</ApplicationIcon>
 
@@ -23,6 +30,9 @@
   <ItemGroup>
     <!-- PerformanceCounter は .NET Core/5+ では別パッケージ(Windows専用)なので明示的に参照する -->
     <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="8.0.0" />
+    <!-- claude プロセスの親子関係(WMI Win32_Process)を調べ、Desktop系/CLI系のプロセスツリーを
+         判別するために使用する(NetworkStateMonitor.RefreshFamilies参照)。 -->
+    <PackageReference Include="System.Management" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>

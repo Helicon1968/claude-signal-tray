@@ -21,7 +21,15 @@
 // 揺れることが分かった。これは当初のアイドル/確認待ちの境界(150KB/s)のすぐ近くだったため、
 // 緑/赤が数秒おきにチラつく問題が発生した。対策として、境界を実測ノイズから
 // 十分離し、かつヒステリシス(状態ごとに異なる閾値)を導入した(詳細は
-// NetworkStateMonitor.Classify 参照)。
+// NetworkStateMonitor.ClassifyDesktop 参照)。
+//
+// 【追記2026-07-06・CLI版(claude-code)の検知】上記の閾値はいずれもClaude Desktop
+// (Cowork)のみで検証されたものだった。実機計測により、コマンドプロンプト等から
+// 起動したCLI版は同じ作業中でもI/O量がDesktop版よりおよそ1000倍小さく(Electronの
+// 多プロセス構成による常時I/Oが無いため)、単純合算では作業中判定に到達し得ない
+// ことが判明した。そのため、WMIでプロセスツリーを調べてDesktop系/CLI系のファミリーに
+// 分離し、それぞれ別の閾値で独立に判定するようにした(詳細はNetworkStateMonitor
+// クラス冒頭のコメント、docs/HISTORY.md参照)。
 
 using System.Diagnostics;
 using System.Text.Json;
@@ -59,9 +67,23 @@ internal sealed class MonitorConfig
     public int DebounceTicks { get; set; } = 4;                // 表示を切り替えるのに必要な連続一致回数
 
     // 閾値(バイト/秒単位)。詳細な経緯・調整根拠はREADME参照。
+    // これらはClaude Desktop(Electron、複数プロセスで構成される)系のファミリーにのみ適用される。
+    // CLI系ファミリーには下記のCli*系の閾値が別途使われる(両者はI/O量の水準が桁違いに異なるため)。
     public float IdleEnterBytesPerSec { get; set; } = 250_000f;        // 確認待ち→アイドルに戻る条件(これ以下)
     public float ConfirmWaitEnterBytesPerSec { get; set; } = 600_000f; // アイドル→確認待ちになる条件(これ以上)
     public float WorkingThresholdBytesPerSec { get; set; } = 2_500_000f; // これ以上なら「作業中」
+
+    // コマンドプロンプト等から起動したCLI版(claude-code)用の閾値。実機計測(2026-07-06)で、
+    // CLIプロセス自身のI/Oは「完全アイドル時=ほぼ完全にゼロ」「生成中=数百〜数千バイト/秒
+    // (稀に数万バイト/秒までスパイク)」と、Desktop系より3桁近く小さい水準であることが
+    // 判明したため、Desktop系と同じ閾値では作業中判定に一切到達しない(常にアイドル表示に
+    // なる)問題があった。そのため別の閾値セットを設ける。なお、CLIの「確認待ち」
+    // (AskUserQuestionやツール実行の許可プロンプト)はローカルの端末UIでの入力待ちであり、
+    // 実行中の通信が発生しないため、I/O量だけではアイドルと区別できない。したがってCLI系は
+    // アイドル/作業中の2値判定のみとし、確認待ち(赤)の検知はDesktop系のみでサポートする
+    // (詳細はdocs/HISTORY.md参照)。
+    public float CliIdleEnterBytesPerSec { get; set; } = 50f;      // 作業中→アイドルに戻る条件(これ以下)
+    public float CliWorkingEnterBytesPerSec { get; set; } = 150f;  // アイドル→作業中になる条件(これ以上)
 
     // 常に最前面に表示する小さなオーバーレイウィンドウの設定。
     // OverlayX/OverlayYが-1(未設定)の場合は、画面右端中央付近を既定位置として使う。
@@ -166,12 +188,32 @@ internal sealed class MonitorConfig
             ConfirmWaitEnterBytesPerSec = d.ConfirmWaitEnterBytesPerSec;
             WorkingThresholdBytesPerSec = d.WorkingThresholdBytesPerSec;
         }
+
+        if (CliIdleEnterBytesPerSec < 0 || CliWorkingEnterBytesPerSec <= CliIdleEnterBytesPerSec)
+        {
+            CliIdleEnterBytesPerSec = d.CliIdleEnterBytesPerSec;
+            CliWorkingEnterBytesPerSec = d.CliWorkingEnterBytesPerSec;
+        }
     }
 }
 
 /// <summary>
 /// Claudeプロセスの I/O 量をサンプリングし、アイドル(0)/作業中(1)/確認待ち(2)/
 /// 不明(-1: プロセスが見つからない)を判定する。
+///
+/// 【2026-07-06追記: ファミリー分けの導入】
+/// 従来は「claudeという名前の全プロセス」のI/Oを1本にまとめてから判定していたが、
+/// 実機計測でClaude Desktop(Electron、複数プロセスで構成)とCLI版(claude-code、
+/// 単一プロセス)ではI/O量の水準が3桁近く異なることが判明した。単純に合算すると、
+/// CLI側の変化量がDesktop側の値に埋もれてしまい、CLIの作業中/確認待ちが
+/// 実質的に検知不能になる問題があった。
+/// そのため、WMI(Win32_Process)でプロセスの親子関係を調べ、プロセスツリーの
+/// ルートごとに独立した「ファミリー」としてI/Oを集計・判定するようにした。
+/// 各ファミリーは、Electron特有の起動引数(--type=...)を持つ子プロセスが
+/// 1つでもあれば「Desktop系」(既存の3段階・閾値)、無ければ「CLI系」
+/// (実測に基づく新しい2段階・閾値、詳細はMonitorConfig参照)として扱う。
+/// 最終的な表示状態は、全ファミリーの判定結果のうち最も深刻なもの
+/// (確認待ち＞作業中＞アイドル)を採用する(詳細はdocs/HISTORY.md参照)。
 /// </summary>
 internal sealed class NetworkStateMonitor
 {
@@ -190,29 +232,50 @@ internal sealed class NetworkStateMonitor
     // 判定されるケースが確認された。実際のAskUserQuestion表示中は700〜800KB/sで
     // 安定していたため、両者の間(600,000)に引き上げて余裕を持たせた。
     // これらの閾値は現在 MonitorConfig 経由で外部化されている(README参照)。
+    // 上記はいずれもDesktop系ファミリーにのみ適用される判定ロジック(ClassifyDesktop)の話。
+    // CLI系ファミリーの判定(ClassifyCli)は別ロジック・別閾値を使う。
+
+    /// <summary>
+    /// プロセスツリーの親子関係(WMI)が取得できなかった場合に使う特別なルートID。
+    /// この場合は全インスタンスを1つのファミリーにまとめ、Desktop系の閾値で判定する
+    /// (ファミリー分け導入前の挙動と同じ、安全側のフォールバック)。
+    /// </summary>
+    private const int FallbackRootPid = int.MinValue;
+
+    private sealed class FamilyState
+    {
+        public bool IsDesktopStyle = true;
+        public readonly Queue<float> Window = new();
+        public int PendingStatus = -2;
+        public int PendingCount;
+        public int CurrentStatus = -1;
+        public float LastMedian;
+    }
 
     private MonitorConfig _config;
 
     private readonly Dictionary<string, PerformanceCounter> _counters = new();
-    private readonly Queue<float> _window = new();
+    private readonly Dictionary<string, int> _instanceRoot = new();
+    private readonly Dictionary<int, FamilyState> _families = new();
 
     private int _tick;
-    private int _pendingStatus = -2;
-    private int _pendingCount;
 
     /// <summary>-1=プロセス未検出/不明, 0=アイドル, 1=作業中, 2=確認待ち</summary>
     public int CurrentStatus { get; private set; } = -1;
 
-    /// <summary>直近ウィンドウの中央値(バイト/秒)。診断表示用。</summary>
+    /// <summary>直近ウィンドウの中央値の合計(バイト/秒)。診断表示用。</summary>
     public float LastMedianBytesPerSec { get; private set; }
 
-    /// <summary>直近1tickの生値(平滑化前、バイト/秒)。診断・ログ用。</summary>
+    /// <summary>直近1tickの生値の合計(平滑化前、バイト/秒)。診断・ログ用。</summary>
     public float LastRawBytesPerSec { get; private set; }
 
-    /// <summary>直近tickでの分類結果(デバウンス前)。診断・ログ用。</summary>
+    /// <summary>直近tickでの分類結果のうち最も深刻なもの(デバウンス前)。診断・ログ用。</summary>
     public int LastBucket { get; private set; } = -2;
 
     public int ProcessCount => _counters.Count;
+
+    /// <summary>現在認識しているファミリー(プロセスツリー)の数。診断表示用。</summary>
+    public int FamilyCount => _families.Count;
 
     /// <summary>ログ出力中かどうか。</summary>
     public bool IsLogging => _logWriter != null;
@@ -232,15 +295,13 @@ internal sealed class NetworkStateMonitor
 
     /// <summary>
     /// 設定ファイルを再読み込みし、以後のサンプリングに反映する。
-    /// 閾値やウィンドウ幅が変わりうるため、内部状態(サンプルウィンドウや
+    /// 閾値やウィンドウ幅が変わりうるため、内部状態(各ファミリーのサンプルウィンドウや
     /// デバウンス中のカウント)は破棄し、次のtickから新しい設定でやり直す。
     /// </summary>
     public void ReloadConfig()
     {
         _config = MonitorConfig.LoadOrCreateDefault();
-        _window.Clear();
-        _pendingStatus = -2;
-        _pendingCount = 0;
+        _families.Clear();
         CurrentStatus = -1;
     }
 
@@ -255,8 +316,8 @@ internal sealed class NetworkStateMonitor
     }
 
     /// <summary>
-    /// デバッグ用ログ出力を開始する。1tickごとに生値・中央値・判定結果・確定状態を
-    /// CSV形式で追記する。既に開始済みなら何もしない。
+    /// デバッグ用ログ出力を開始する。1tickごとに生値・中央値・判定結果・確定状態・
+    /// ファミリー内訳をCSV形式で追記する。既に開始済みなら何もしない。
     /// </summary>
     public string StartLogging()
     {
@@ -270,7 +331,7 @@ internal sealed class NetworkStateMonitor
 
         var path = Path.Combine(dir, $"log-{DateTime.Now:yyyyMMdd-HHmmss}.csv");
         var writer = new StreamWriter(path, append: false) { AutoFlush = true };
-        writer.WriteLine("timestamp,raw_bytes_per_sec,median_bytes_per_sec,bucket,status,process_count");
+        writer.WriteLine("timestamp,raw_bytes_per_sec,median_bytes_per_sec,bucket,status,process_count,family_count,families");
 
         _logWriter = writer;
         LogFilePath = path;
@@ -297,9 +358,7 @@ internal sealed class NetworkStateMonitor
         if (_counters.Count == 0)
         {
             CurrentStatus = -1;
-            _pendingStatus = -2;
-            _pendingCount = 0;
-            _window.Clear();
+            _families.Clear();
             LastRawBytesPerSec = 0;
             LastMedianBytesPerSec = 0;
             LastBucket = -1;
@@ -307,33 +366,66 @@ internal sealed class NetworkStateMonitor
             return;
         }
 
-        float sum = 0;
-        foreach (var counter in _counters.Values)
+        float totalRaw = 0;
+        var familySum = new Dictionary<int, float>();
+
+        foreach (var (name, counter) in _counters)
         {
+            float value = 0;
             try
             {
-                sum += counter.NextValue();
+                value = counter.NextValue();
             }
             catch
             {
-                // プロセスが終了した等で読み取り失敗した場合はスキップする
+                // プロセスが終了した等で読み取り失敗した場合はスキップする(0扱い)
             }
+
+            totalRaw += value;
+
+            var root = _instanceRoot.TryGetValue(name, out var r) ? r : FallbackRootPid;
+            familySum[root] = familySum.GetValueOrDefault(root) + value;
         }
 
-        LastRawBytesPerSec = sum;
+        LastRawBytesPerSec = totalRaw;
 
-        _window.Enqueue(sum);
-        while (_window.Count > _config.WindowSize)
+        float totalMedian = 0;
+        var overallStatus = -1;
+        var overallBucket = -1;
+
+        foreach (var (root, sum) in familySum)
         {
-            _window.Dequeue();
+            if (!_families.TryGetValue(root, out var family))
+            {
+                // RefreshCounters未実施のtickで未知のrootが現れた場合の保険
+                // (Desktop系扱いにしておくのが安全側)。
+                family = new FamilyState();
+                _families[root] = family;
+            }
+
+            family.Window.Enqueue(sum);
+            while (family.Window.Count > _config.WindowSize)
+            {
+                family.Window.Dequeue();
+            }
+
+            var median = Median(family.Window);
+            family.LastMedian = median;
+            totalMedian += median;
+
+            var bucket = family.IsDesktopStyle
+                ? ClassifyDesktop(median, family.CurrentStatus)
+                : ClassifyCli(median, family.CurrentStatus);
+
+            ApplyFamilyDebounce(family, bucket);
+
+            overallBucket = Math.Max(overallBucket, bucket);
+            overallStatus = Math.Max(overallStatus, family.CurrentStatus);
         }
 
-        var median = Median(_window);
-        LastMedianBytesPerSec = median;
-
-        var bucket = Classify(median);
-        LastBucket = bucket;
-        ApplyDebounce(bucket);
+        LastMedianBytesPerSec = totalMedian;
+        LastBucket = overallBucket;
+        CurrentStatus = overallStatus;
 
         WriteLogRow();
     }
@@ -347,13 +439,18 @@ internal sealed class NetworkStateMonitor
 
         try
         {
+            var familiesSummary = string.Join('|', _families.Select(kv =>
+                $"{kv.Key}:{(kv.Value.IsDesktopStyle ? "D" : "C")}:{kv.Value.CurrentStatus}:{kv.Value.LastMedian:0}"));
+
             _logWriter.WriteLine(string.Join(',',
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"),
                 LastRawBytesPerSec.ToString("0"),
                 LastMedianBytesPerSec.ToString("0"),
                 LastBucket,
                 CurrentStatus,
-                ProcessCount));
+                ProcessCount,
+                _families.Count,
+                familiesSummary));
         }
         catch
         {
@@ -361,14 +458,15 @@ internal sealed class NetworkStateMonitor
         }
     }
 
-    private int Classify(float median)
+    /// <summary>Desktop系(Electron)ファミリー用の3段階判定。ロジック自体は従来と同じ。</summary>
+    private int ClassifyDesktop(float median, int currentStatus)
     {
         if (median >= _config.WorkingThresholdBytesPerSec)
         {
             return 1; // 作業中
         }
 
-        if (CurrentStatus == 1)
+        if (currentStatus == 1)
         {
             // 作業中(1)から確認待ち(2)へは直接遷移させない。
             // 生成が終わってI/Oが下がっていく「余韻」が、たまたま確認待ち帯の
@@ -380,9 +478,9 @@ internal sealed class NetworkStateMonitor
         }
 
         // アイドル(0)/確認待ち(2)の境界はヒステリシス付き。
-        // 現在の確定状態(CurrentStatus)を基準に、切り替わり方向ごとに
+        // 現在の確定状態(currentStatus)を基準に、切り替わり方向ごとに
         // 別々の閾値を使う。
-        var wasConfirmWait = CurrentStatus == 2;
+        var wasConfirmWait = currentStatus == 2;
 
         if (wasConfirmWait)
         {
@@ -392,30 +490,51 @@ internal sealed class NetworkStateMonitor
         return median >= _config.ConfirmWaitEnterBytesPerSec ? 2 : 0;
     }
 
-    private void ApplyDebounce(int bucket)
+    /// <summary>
+    /// CLI系(claude-code等、単一プロセス)ファミリー用の判定。
+    /// 実機計測(2026-07-06)で、完全アイドル時はほぼ完全にゼロ、作業中(生成中)は
+    /// 数百〜数千バイト/秒(稀に数万バイト/秒までスパイク)という、Desktop系より
+    /// 3桁近く小さい水準であることが分かったため、専用の閾値でアイドル(0)/
+    /// 作業中(1)の2値のみをヒステリシス付きで判定する。
+    /// CLIの確認待ち(AskUserQuestionやツール実行の許可プロンプト)はローカルの
+    /// 端末UIでの入力待ちであり通信が発生しないため、I/O量だけではアイドルと
+    /// 区別できない。そのため確認待ち(2)はCLI系では検知しない
+    /// (詳細はdocs/HISTORY.md参照)。
+    /// </summary>
+    private int ClassifyCli(float median, int currentStatus)
     {
-        if (bucket == _pendingStatus)
+        if (currentStatus == 1)
         {
-            _pendingCount++;
+            return median <= _config.CliIdleEnterBytesPerSec ? 0 : 1;
+        }
+
+        return median >= _config.CliWorkingEnterBytesPerSec ? 1 : 0;
+    }
+
+    private void ApplyFamilyDebounce(FamilyState family, int bucket)
+    {
+        if (bucket == family.PendingStatus)
+        {
+            family.PendingCount++;
         }
         else
         {
-            _pendingStatus = bucket;
-            _pendingCount = 1;
+            family.PendingStatus = bucket;
+            family.PendingCount = 1;
         }
 
-        if (_pendingCount >= _config.DebounceTicks)
+        if (family.PendingCount >= _config.DebounceTicks)
         {
-            CurrentStatus = bucket;
+            family.CurrentStatus = bucket;
         }
     }
 
     private void RefreshCounters()
     {
         List<string> instanceNames;
+        var processName = _config.ProcessName;
         try
         {
-            var processName = _config.ProcessName;
             instanceNames = new PerformanceCounterCategory("Process")
                 .GetInstanceNames()
                 .Where(n => n.Equals(processName, StringComparison.OrdinalIgnoreCase)
@@ -451,6 +570,117 @@ internal sealed class NetworkStateMonitor
             {
                 // カウンター作成に失敗した場合はスキップする(次回リフレッシュで再試行)
             }
+        }
+
+        RefreshFamilies(instanceNames, processName);
+    }
+
+    /// <summary>
+    /// WMI(Win32_Process)で対象プロセスの親子関係を調べ、プロセスツリーのルートごとに
+    /// ファミリーを再構成する。ルートの判定は「親プロセスも監視対象集合に含まれる限り
+    /// たどる」方式(Electronの子プロセスは本体を親に持つため、本体がルートになる)。
+    /// WMIが使えない環境では、全インスタンスを1つのファミリー(Desktop系扱い)に
+    /// まとめるフォールバックとする(導入前の挙動と同じ、安全側)。
+    /// </summary>
+    private void RefreshFamilies(List<string> instanceNames, string processName)
+    {
+        var instancePid = new Dictionary<string, int>();
+        foreach (var name in instanceNames)
+        {
+            try
+            {
+                using var idCounter = new PerformanceCounter("Process", "ID Process", name, readOnly: true);
+                instancePid[name] = (int)idCounter.NextValue();
+            }
+            catch
+            {
+                // 取得できなかったインスタンスは、下のフォールバック処理でまとめて扱う。
+            }
+        }
+
+        var procInfo = new Dictionary<int, (int ParentPid, string CommandLine)>();
+        var wmiOk = false;
+        try
+        {
+            var escapedName = processName.Replace("'", "''");
+            using var searcher = new System.Management.ManagementObjectSearcher(
+                $"SELECT ProcessId, ParentProcessId, CommandLine FROM Win32_Process WHERE Name = '{escapedName}.exe'");
+            foreach (System.Management.ManagementObject mo in searcher.Get())
+            {
+                var pid = Convert.ToInt32(mo["ProcessId"]);
+                var ppid = Convert.ToInt32(mo["ParentProcessId"]);
+                var cmd = mo["CommandLine"] as string ?? string.Empty;
+                procInfo[pid] = (ppid, cmd);
+            }
+            wmiOk = true;
+        }
+        catch
+        {
+            // WMIが無効化されている環境などでは、下のフォールバックに委ねる。
+        }
+
+        var newInstanceRoot = new Dictionary<string, int>();
+        var rootIsDesktopStyle = new Dictionary<int, bool>();
+
+        if (wmiOk && procInfo.Count > 0)
+        {
+            int ResolveRoot(int pid)
+            {
+                var visited = new HashSet<int>();
+                var current = pid;
+                while (procInfo.TryGetValue(current, out var info)
+                       && procInfo.ContainsKey(info.ParentPid)
+                       && visited.Add(current))
+                {
+                    current = info.ParentPid;
+                }
+                return current;
+            }
+
+            foreach (var (name, pid) in instancePid)
+            {
+                var root = ResolveRoot(pid);
+                newInstanceRoot[name] = root;
+
+                var isElectronChild = procInfo.TryGetValue(pid, out var info)
+                    && info.CommandLine.Contains("--type=", StringComparison.Ordinal);
+
+                rootIsDesktopStyle[root] = isElectronChild || rootIsDesktopStyle.GetValueOrDefault(root);
+            }
+        }
+
+        // WMIで解決できなかったインスタンス(取得失敗 or WMI自体が使えない)は、
+        // 安全側としてDesktop系の単一フォールバックファミリーにまとめる。
+        foreach (var name in instanceNames)
+        {
+            if (!newInstanceRoot.ContainsKey(name))
+            {
+                newInstanceRoot[name] = FallbackRootPid;
+                rootIsDesktopStyle[FallbackRootPid] = true;
+            }
+        }
+
+        _instanceRoot.Clear();
+        foreach (var kv in newInstanceRoot)
+        {
+            _instanceRoot[kv.Key] = kv.Value;
+        }
+
+        var currentRoots = new HashSet<int>(newInstanceRoot.Values);
+
+        foreach (var staleRoot in _families.Keys.Where(r => !currentRoots.Contains(r)).ToList())
+        {
+            _families.Remove(staleRoot);
+        }
+
+        foreach (var root in currentRoots)
+        {
+            if (!_families.TryGetValue(root, out var family))
+            {
+                family = new FamilyState();
+                _families[root] = family;
+            }
+            family.IsDesktopStyle = rootIsDesktopStyle.GetValueOrDefault(root, true);
         }
     }
 
@@ -739,7 +969,7 @@ internal sealed class TrayContext : ApplicationContext
             case 0:
                 _trayIcon.Icon = _iconGreen;
                 _trayIcon.Text = $"claude-signal-tray: 待機中/完了 ({kbText} KB/s)";
-                _itemStatus.Text = $"待機中/完了 ({kbText} KB/s, {_monitor.ProcessCount}プロセス)";
+                _itemStatus.Text = $"待機中/完了 ({kbText} KB/s, {_monitor.ProcessCount}プロセス/{_monitor.FamilyCount}グループ)";
                 _overlay.SetDotColor(ColorGreen);
                 _overlay.SetText($"待機中/完了 ({kbText} KB/s)");
                 _overlay.SetPetState("idle");
@@ -747,7 +977,7 @@ internal sealed class TrayContext : ApplicationContext
             case 1:
                 _trayIcon.Icon = _iconYellow;
                 _trayIcon.Text = $"claude-signal-tray: 作業中 ({kbText} KB/s)";
-                _itemStatus.Text = $"作業中 ({kbText} KB/s, {_monitor.ProcessCount}プロセス)";
+                _itemStatus.Text = $"作業中 ({kbText} KB/s, {_monitor.ProcessCount}プロセス/{_monitor.FamilyCount}グループ)";
                 _overlay.SetDotColor(ColorYellow);
                 _overlay.SetText($"作業中 ({kbText} KB/s)");
                 _overlay.SetPetState("run");
@@ -755,7 +985,7 @@ internal sealed class TrayContext : ApplicationContext
             case 2:
                 // ドットの点滅は _blinkTimer が担当するので、ここではテキストのみ更新する。
                 _trayIcon.Text = $"claude-signal-tray: 確認待ちの可能性 ({kbText} KB/s)";
-                _itemStatus.Text = $"確認待ちの可能性 ({kbText} KB/s, {_monitor.ProcessCount}プロセス)";
+                _itemStatus.Text = $"確認待ちの可能性 ({kbText} KB/s, {_monitor.ProcessCount}プロセス/{_monitor.FamilyCount}グループ)";
                 _overlay.SetText($"確認待ちの可能性 ({kbText} KB/s)");
                 _overlay.SetPetState("wave");
                 break;
@@ -888,8 +1118,18 @@ internal sealed class OverlayWindow : Form
             c.ContextMenuStrip = contextMenu;
         }
 
+        // ディスプレイの拡大縮小率(100%超)や、DPIの異なるモニターへの移動時に
+        // レイアウトを再計算する(ApplyLayout内のScale()参照)。
+        DpiChanged += (_, _) => ApplyLayout();
+
         ApplyLayout();
     }
+
+    /// <summary>96 DPI(拡大縮小率100%)を基準とした、現在のDPIでの拡大率。</summary>
+    private float DpiScaleFactor => DeviceDpi / 96f;
+
+    /// <summary>96 DPI基準のピクセル値を、現在のDPIに合わせて拡大縮小する。</summary>
+    private int Scale(int value96Dpi) => (int)Math.Round(value96Dpi * DpiScaleFactor);
 
     public void SetDotColor(Color color) => _dot.BackColor = color;
 
@@ -923,6 +1163,14 @@ internal sealed class OverlayWindow : Form
     /// <summary>
     /// 現在のモード(信号機/ペット)とサイズ(小/大)に応じてレイアウトを組み直す。
     /// 信号機: 横並びの ●＋テキスト。 ペット: スプライトを上、テキストを下に配置。
+    ///
+    /// 【2026-07-06追記】ここで使う数値はすべて96 DPI(拡大縮小率100%)を基準とした
+    /// ピクセル値で、Scale()を通してから実際にSize/Locationへ設定する。フォント
+    /// (Font)はポイント単位でありDPIに応じてGDI+側が自動で適切な物理サイズに変換
+    /// してくれるため、ここではフォントサイズ自体はスケールしない。以前はScale()を
+    /// 通さず生のピクセル値を直接使っていたため、ディスプレイの拡大縮小率が100%を
+    /// 超える環境ではフォントだけが大きく描画され、コンテナ(ドットやラベル)のサイズは
+    /// 変わらないままとなり、●やテキストが見切れる不具合があった。
     /// </summary>
     private void ApplyLayout()
     {
@@ -931,36 +1179,36 @@ internal sealed class OverlayWindow : Form
 
         if (_petMode)
         {
-            var scale = _large ? 3 : 2;
-            _petView.SetScale(scale);
+            var baseScale = _large ? 3 : 2;
+            _petView.SetScale(Math.Max(1, (int)Math.Round(baseScale * DpiScaleFactor)));
 
-            var width = Math.Max(_petView.Width + 24, _large ? 210 : 150);
-            var labelHeight = _large ? 22 : 18;
-            Size = new Size(width, 6 + _petView.Height + labelHeight + 6);
+            var width = Math.Max(_petView.Width + Scale(24), Scale(_large ? 210 : 150));
+            var labelHeight = Scale(_large ? 22 : 18);
+            Size = new Size(width, Scale(6) + _petView.Height + labelHeight + Scale(6));
 
-            _petView.Location = new Point((width - _petView.Width) / 2, 6);
-            _label.Location = new Point(4, 6 + _petView.Height + 2);
-            _label.Size = new Size(width - 8, labelHeight);
+            _petView.Location = new Point((width - _petView.Width) / 2, Scale(6));
+            _label.Location = new Point(Scale(4), Scale(6) + _petView.Height + Scale(2));
+            _label.Size = new Size(width - Scale(8), labelHeight);
             _label.TextAlign = ContentAlignment.MiddleCenter;
             _label.Font = new Font("Segoe UI", _large ? 10f : 8f);
         }
         else if (_large)
         {
-            Size = new Size(300, 60);
-            _dot.Size = new Size(22, 22);
-            _dot.Location = new Point(16, 19);
-            _label.Location = new Point(48, 15);
-            _label.Size = new Size(236, 30);
+            Size = new Size(Scale(300), Scale(60));
+            _dot.Size = new Size(Scale(22), Scale(22));
+            _dot.Location = new Point(Scale(16), Scale(19));
+            _label.Location = new Point(Scale(48), Scale(15));
+            _label.Size = new Size(Scale(236), Scale(30));
             _label.TextAlign = ContentAlignment.TopLeft;
             _label.Font = new Font("Segoe UI", 12f);
         }
         else
         {
-            Size = new Size(220, 44);
-            _dot.Size = new Size(16, 16);
-            _dot.Location = new Point(12, 14);
-            _label.Location = new Point(36, 11);
-            _label.Size = new Size(172, 22);
+            Size = new Size(Scale(220), Scale(44));
+            _dot.Size = new Size(Scale(16), Scale(16));
+            _dot.Location = new Point(Scale(12), Scale(14));
+            _label.Location = new Point(Scale(36), Scale(11));
+            _label.Size = new Size(Scale(172), Scale(22));
             _label.TextAlign = ContentAlignment.TopLeft;
             _label.Font = new Font("Segoe UI", 9f);
         }
