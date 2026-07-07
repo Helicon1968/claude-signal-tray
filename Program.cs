@@ -92,6 +92,12 @@ internal sealed class MonitorConfig
     public int OverlayX { get; set; } = -1;
     public int OverlayY { get; set; } = -1;
 
+    /// <summary>trueの場合、オーバーレイの背景(濃色の半透明ボックス)を完全に透明にする。
+    /// WinFormsの制約上、TransparencyKeyとForm.Opacity&lt;1は併用できないため、
+    /// 有効時はOpacityを1.0にしてTransparencyKeyによる色キー方式の透明化に切り替える
+    /// (半透明のボックスではなく、ドット/テキスト/ペットのみが見える完全な素通しになる)。</summary>
+    public bool OverlayTransparentBackground { get; set; }
+
     /// <summary>"Small" または "Large"。不正な値は既定値(Small)にフォールバックする。</summary>
     public string OverlaySize { get; set; } = "Small";
 
@@ -720,6 +726,7 @@ internal sealed class TrayContext : ApplicationContext
     private readonly ToolStripMenuItem _itemOverlaySizeLarge;
     private readonly ToolStripMenuItem _itemModeSignal;
     private readonly ToolStripMenuItem _itemModePet;
+    private readonly ToolStripMenuItem _itemTransparentBg;
     private readonly ToolStripMenuItem _itemPetSelect;
     private readonly System.Windows.Forms.Timer _pollTimer;
     private readonly System.Windows.Forms.Timer _blinkTimer;
@@ -791,6 +798,15 @@ internal sealed class TrayContext : ApplicationContext
         itemOverlayMode.DropDownItems.Add(_itemModePet);
         menu.Items.Add(itemOverlayMode);
 
+        // オーバーレイ背景の透明化(既定はOFF=濃色の半透明ボックス)。
+        _itemTransparentBg = new ToolStripMenuItem("背景を透明にする")
+        {
+            CheckOnClick = true,
+            Checked = _monitor.Config.OverlayTransparentBackground,
+        };
+        _itemTransparentBg.CheckedChanged += (_, _) => SetOverlayTransparentBackground(_itemTransparentBg.Checked);
+        menu.Items.Add(_itemTransparentBg);
+
         // ペットの選択。開くたびにpetsフォルダをスキャンして最新の一覧を表示する。
         _itemPetSelect = new ToolStripMenuItem("ペットの選択");
         _itemPetSelect.DropDownOpening += (_, _) => RebuildPetMenu();
@@ -817,6 +833,7 @@ internal sealed class TrayContext : ApplicationContext
         _overlay = new OverlayWindow(menu, PetLibrary.LoadByNameOrDefault(_monitor.Config.PetName));
         _overlay.ApplySizePreset(isLargeInitial);
         _overlay.SetPetMode(isPetInitial);
+        _overlay.SetTransparentBackground(_monitor.Config.OverlayTransparentBackground);
         _overlay.PositionChanged += OnOverlayPositionChanged;
         PositionOverlayIfNeeded();
         if (_monitor.Config.OverlayEnabled)
@@ -861,6 +878,13 @@ internal sealed class TrayContext : ApplicationContext
         {
             _overlay.Hide();
         }
+    }
+
+    private void SetOverlayTransparentBackground(bool transparent)
+    {
+        _monitor.Config.OverlayTransparentBackground = transparent;
+        _monitor.Config.TrySave();
+        _overlay.SetTransparentBackground(transparent);
     }
 
     private void SetOverlayMode(bool petMode)
@@ -936,7 +960,7 @@ internal sealed class TrayContext : ApplicationContext
     private void PositionOverlayIfNeeded()
     {
         var cfg = _monitor.Config;
-        if (cfg.OverlayX >= 0 && cfg.OverlayY >= 0)
+        if (cfg.OverlayX >= 0 && cfg.OverlayY >= 0 && IsPointOnAnyScreen(new Point(cfg.OverlayX, cfg.OverlayY)))
         {
             _overlay.Location = new Point(cfg.OverlayX, cfg.OverlayY);
             return;
@@ -947,6 +971,25 @@ internal sealed class TrayContext : ApplicationContext
         var x = area.Right - _overlay.Width - 16;
         var y = area.Top + (area.Height - _overlay.Height) / 2;
         _overlay.Location = new Point(x, y);
+    }
+
+    /// <summary>
+    /// 保存済みの座標が、現在つながっているいずれかの画面の範囲内に実在するかを確認する。
+    /// 別解像度の環境(例: 4Kモニタでドラッグ保存した座標を1920x1200環境のconfig.jsonに
+    /// 持ち込んだ場合など)では座標だけが有効でも画面自体が存在せず、オーバーレイが
+    /// 画面外に描画されて見えなくなる問題があったため、位置適用前に検証する。
+    /// </summary>
+    private static bool IsPointOnAnyScreen(Point point)
+    {
+        foreach (var screen in Screen.AllScreens)
+        {
+            if (screen.Bounds.Contains(point))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void UpdateStatus()
@@ -1089,9 +1132,8 @@ internal sealed class OverlayWindow : Form
         ShowInTaskbar = false;
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
-        BackColor = Color.FromArgb(32, 32, 32);
-        Opacity = 0.92;
         ContextMenuStrip = contextMenu;
+        SetTransparentBackground(false);
 
         _dot = new Panel { BackColor = Color.Gray };
         Controls.Add(_dot);
@@ -1130,6 +1172,31 @@ internal sealed class OverlayWindow : Form
 
     /// <summary>96 DPI基準のピクセル値を、現在のDPIに合わせて拡大縮小する。</summary>
     private int Scale(int value96Dpi) => (int)Math.Round(value96Dpi * DpiScaleFactor);
+
+    // ドット(信号色)やペットのスプライトが使わなさそうな色をキー色として選んでいる。
+    private static readonly Color TransparentKeyColor = Color.FromArgb(255, 1, 2, 3);
+
+    /// <summary>
+    /// オーバーレイの背景を、濃色の半透明ボックス(既定)と完全な透明(色キー方式)の
+    /// 間で切り替える。WinFormsではTransparencyKeyとOpacity&lt;1を併用できない
+    /// (Opacity指定時はアルファブレンド方式になりTransparencyKeyが無視される)ため、
+    /// 透明化時はOpacityを1.0に戻す。
+    /// </summary>
+    public void SetTransparentBackground(bool transparent)
+    {
+        if (transparent)
+        {
+            BackColor = TransparentKeyColor;
+            TransparencyKey = TransparentKeyColor;
+            Opacity = 1.0;
+        }
+        else
+        {
+            TransparencyKey = Color.Empty;
+            BackColor = Color.FromArgb(32, 32, 32);
+            Opacity = 0.92;
+        }
+    }
 
     public void SetDotColor(Color color) => _dot.BackColor = color;
 
