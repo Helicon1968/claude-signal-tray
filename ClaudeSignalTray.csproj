@@ -14,7 +14,7 @@
     <RootNamespace>ClaudeSignalTray</RootNamespace>
     <!-- installer/ClaudeSignalTrayInstaller.wixproj からMSIのProductVersionとして参照する。
          上げる場合はここを変更する(MSIのUpgradeCode等はinstaller側のPackage.wxs参照)。 -->
-    <Version>1.2.0</Version>
+    <Version>1.3.0</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
     <ApplicationIcon>icon.ico</ApplicationIcon>
 
